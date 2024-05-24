@@ -1,48 +1,70 @@
 #!/usr/bin/env sh
 #
-# Prompts you for keywords to your local files, directories or Google search and launches them respectively.
-# Dependencies: grep, sed, find, awk, file, xargs
+# Prompts you for keywords to your local files, directories or DuckDuckGo search and launches them respectively.
+# Dependencies: grep, sed, find, awk, file, xargs, ed
 
 MAXDEPTH=6
+HOME_DIR=/home/maxine
 SEARCHLIST=/tmp/searchlist
+HISTORYLIST=/tmp/historylist
 
 #========================================================
 # Modify this section according to your preference
 #========================================================
 launch() {
-   case $(file --mime-type "$1" -bL) in
-      #====================================================
-      # Find out the mimetype of the file you wannna launch
-      #====================================================
-      video/*)
-         #================================================
-         # Launch using your favorite programs
-         #================================================
-         mpv "$1"
-         ;;
+   # If the selection does not exist in the history file, add it
+   grep -q -F "$1" $HISTORYLIST
+   if [ $? -ne 0 ]; then
+      echo "$1" >>$HISTORYLIST
+   fi
+
+   #====================================================
+   # Find out the mimetype of the file you wannna launch
+   # Mimetype documentation/list:
+   # https://www.iana.org/assignments/media-types/media-types.xhtml
+   #====================================================
+   TYPE=$(file --mime-type "$*" -bL)
+   case $TYPE in
+   #================================================
+   # Mimetype of the file with wildcard
+   #================================================
+   video/*)
       #================================================
-      # So on and so forth
+      # Launch using your favorite programs or program
+      # in variable like $TERMINAL or $EXPLORER
       #================================================
-      application/pdf | application/epub+zip)
-         zathura "$1"
-         ;;
-      text/* | inode/x-empty | application/json | application/octet-stream)
-         "$TERMINAL" "$EDITOR" "$1"
-         # st "$EDITOR" "$*"
-         ;;
-      inode/directory)
-         "$TERMINAL" "$EXPLORER" "$*"
-         # st lf "$*"
-         ;;
+      mpv "$*"
+      ;;
+   text/* | inode/x-empty | application/json | application/octet-stream)
+      "$TERMINAL" -e "$EDITOR" "$*"
+      ;;
+   inode/directory)
+      "$EXPLORER" "$*"
+      ;;
+   application/pdf | application/epub+zip | image/*)
+      "$BROWSER" "$*"
+      ;;
+   #================================================
+   # Default case
+   #================================================
+   *)
+      "$TERMINAL" cat "$*"
+      ;;
    esac
+
+   # update history file AFTER launching so as to not
+   # cause a delay in opening the program
+   move_lines_from_history
+
 }
 
 search_n_launch() {
-   RESULT=$(grep "$1" "$SEARCHLIST" | head -1)
+   LOC=$(echo "$1" | sed -e "s|~|$HOME_DIR|g;s|\.\.||g")
+   RESULT=$(grep "$LOC" $SEARCHLIST | head -1)
    if [ -n "$RESULT" ]; then
       launch "$RESULT"
    else
-      "$BROWSER" google.com/search\?q="$1"
+      "$BROWSER" "duckduckgo.com/?q=$*"
    fi
 }
 
@@ -54,9 +76,40 @@ get_config() {
    done < "$1"
 }
 
+move_lines_from_history() {
+   while IFS= read -r line; do
+      (
+         echo H
+         echo "?$line?m0"
+         echo "w"
+         echo "q"
+      ) | ed -s $SEARCHLIST
+   done <$HISTORYLIST
+}
+
 dmenu_search() {
-   QUERY=$(awk -F / '{print $(NF-1)"/"$NF}' "$SEARCHLIST" | "$1") &&
+   # get the folder before home to change it to ~/
+   HDIR=$(echo "$HOME_DIR" | awk -F / '{print $NF}')
+   QUERY=$(awk -F / -v HDIR=$HDIR '{
+	if (NF > 4)
+		if ($(NF - 2) == HDIR)
+			printf "~/%s/%s\n", $(NF - 1), $NF
+		else if ($(NF - 3) == HDIR)
+			printf "~/%s/%s/%s\n", $(NF - 2), $(NF - 1), $NF
+		else if ($(NF - 4) == HDIR)
+			printf "~/%s/%s/%s/%s\n", $(NF - 3), $(NF - 2), $(NF - 1), $NF
+		else
+			printf "../%s/%s/%s/%s\n", $(NF - 3), $(NF - 2), $(NF - 1), $NF
+		}' "$SEARCHLIST" | "$1") &&
       search_n_launch "$QUERY"
+}
+
+run_dmenu() {
+   dmenu -i
+}
+
+run_rofi() {
+   rofi -sort true -sorting-method fzf -dmenu -i -p "Bolt Launch"
 }
 
 tmux_search() {
@@ -75,11 +128,11 @@ tmux_search() {
 }
 
 fzf_search() {
-   QUERY=$(awk -F / '{print $(NF-1)"/"$NF}' "$SEARCHLIST" |
+   QUERY=$(awk -F / '{print $(NF-2)"/"$(NF-1)"/"$NF}' "$SEARCHLIST" |
       fzf -e -i \
          --reverse \
          --border \
-         --margin 15%,25% \
+         --margin 5%,10% \
          --info hidden \
          --bind=tab:down,btab:up \
          --prompt "launch ") &&
@@ -98,7 +151,8 @@ generate() {
    FILTERS=$(get_config ~/.config/bolt/filters | awk '{printf "%s\\|",$0;}' | sed -e 's/|\./|\\./g' -e 's/\\|$//g')
    get_config ~/.config/bolt/paths |
       xargs -I% find % -maxdepth $MAXDEPTH \
-         ! -regex ".*\($FILTERS\).*" > "$SEARCHLIST"
+         ! -regex ".*\($FILTERS\).*" >"$SEARCHLIST"
+   move_lines_from_history
 }
 
 while :; do
@@ -108,11 +162,11 @@ while :; do
       --fzf-search) fzf_search ;;
       --launch) launch "$2" ;;
       --rofi-search)
-         dmenu_search "rofi -sort true -sorting-method fzf -dmenu -i -p Open)"
+         dmenu_search "run_rofi"
          ;;
-      --dmenu-search) dmenu_search "dmenu -i" ;;
+      --dmenu-search) dmenu_search "run_dmenu" ;;
       --watch) watch ;;
-      *) break ;;
+   *) break ;;
    esac
    shift
 done
